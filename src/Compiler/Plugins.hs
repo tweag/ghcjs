@@ -53,9 +53,26 @@
 
  -}
 
-module Compiler.Plugins where
+module Compiler.Plugins (
+  module Name
+  , getValueSafely
+  , getHValueSafely
+  , remapName
+  , remapUnit
+  , initPluginsEnv
+  , unitToPkg
+  , filterPackageDBFlags
+  , filterPackageConfs
+  , wrongTyThingError
+  , missingTyThingError
+  , missingTyThingErrorGHC
+  , throwCmdLineErrorS
+  , throwCmdLineError
+  )
+where
 
 import DynFlags
+import Debug.Trace
 import HscTypes
 import Id
 import Module
@@ -147,13 +164,16 @@ getHValueSafely orig_dflags js_env hsc_env orig_name expected_type = do
 remapName :: HscEnv -> HscEnv -> Name -> IO Name
 remapName src_env tgt_env val_name
   | Just m <- nameModule_maybe val_name =
-    case remapUnit sdf tdf (moduleName m) (moduleUnitId m) of
+    case trace ("PKG " ++ show m) (remapUnit sdf tdf (moduleName m) (moduleUnitId m))of
       Nothing         ->
         throwCmdLineErrorS (hsc_dflags tgt_env) $ missingTyThingErrorGHC val_name
       Just tgt_unitid ->
         let new_m = mkModule tgt_unitid (moduleName m)
-        in  pure $ mkExternalName (nameUnique val_name) new_m
+        in do
+          let x = mkExternalName (nameUnique val_name) new_m
                                   (nameOccName val_name) (nameSrcSpan val_name)
+          traceM ("PKG Result: " ++ show x)
+          pure x
   | otherwise = pure val_name
   where
     sdf = hsc_dflags src_env
@@ -166,25 +186,26 @@ remapUnit :: DynFlags
           -> Maybe UnitId
 remapUnit src_dflags tgt_dflags module_name unit
   -- first try package with same unit id if possible
-  | Just _ <- lookupPackage tgt_dflags unit = Just unit
+  | Just _ <- lookupPackage tgt_dflags unit = trace "PKG Found with package id" $ Just unit
   -- if we're building the package, then we don't have a PackageConfig for it
   | unit == thisPackage tgt_dflags
   , tgt_config:_    <- searchPackageId tgt_dflags (SourcePackageId . mkFastString . unitToPkg . unitIdString $ unit)
-  , Just m <- lookup module_name (instantiatedWith tgt_config) =
+  , Just m <- lookup module_name (instantiatedWith tgt_config) = trace "PKG Don't have a config" $
     Just (moduleUnitId m)
   -- otherwise look up package with same package id (e.g. foo-0.1)
   | Just src_config <- lookupPackage src_dflags unit
   , tgt_config:_    <- searchPackageId tgt_dflags (sourcePackageId src_config)
   , Just m <- lookup module_name (instantiatedWith tgt_config)
-  = Just (moduleUnitId m)
+  = trace "PKG same ID " $ Just (moduleUnitId m)
     -- Just (unitId tgt_config)
-  | otherwise = Nothing
+  | otherwise = trace "PKG Not found" Nothing
 
 initPluginsEnv :: DynFlags -> Maybe HscEnv -> IO (Maybe HscEnv, HscEnv)
 initPluginsEnv _ (Just env) = pure (Just env, env)
 initPluginsEnv orig_dflags _ = do
   let trim = let f = reverse . dropWhile isSpace in f . f
   ghcTopDir   <- readFile (topDir orig_dflags </> "ghc_libdir")
+  traceM $ "PKG Topdir: " ++ ghcTopDir
   ghcSettings <- SysTools.initSysTools (Just $ trim ghcTopDir)
   let removeJsPrefix xs = fromMaybe xs (stripPrefix "js_" xs)
       dflags0 = orig_dflags { settings = ghcSettings }
